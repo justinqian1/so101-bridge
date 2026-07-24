@@ -38,7 +38,7 @@ python -m pi.calibrate --arm leader
 
 # 2. Record teleop episodes.
 python -m pi.record --task pick_cube
-#   Per episode, press:  g = keep (good)   d = discard   q = keep + quit
+#   Press: s = start recording; g = keep (good); d = discard; q = quit
 
 # 3. Convert on the desktop and CHECK alignment before recording 200 more.
 python -m desktop.convert --session sessions/2026-07-23_pick_cube \

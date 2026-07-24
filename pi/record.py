@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -64,15 +65,27 @@ class KeyListener:
     def _loop(self):
         import select
         while not self._stop.is_set():
-            if select.select([sys.stdin], [], [], 0.1)[0]:
-                ch = sys.stdin.read(1)
+            if select.select([self._fd], [], [], 0.1)[0]:
+                # Read the raw fd: sys.stdin.read(1) pulls every pending byte into
+                # Python's buffer and returns one, stranding the rest where select
+                # can't see them — a double-tapped key would go unnoticed.
+                b = os.read(self._fd, 1)
+                if not b:
+                    return
                 with self._lock:
-                    self._key = ch
+                    self._key = b.decode(errors="ignore")
 
     def poll(self) -> str | None:
         with self._lock:
             k, self._key = self._key, None
         return k
+
+    def wait(self, keys: str) -> str:
+        while True:
+            k = self.poll()
+            if k and k in keys:
+                return k
+            time.sleep(0.02)
 
     def restore(self):
         self._stop.set()
@@ -109,47 +122,59 @@ def _parse_cam(spec: str) -> tuple[str, str]:
 # ── one episode ──────────────────────────────────────────────────────────────
 
 def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus,
-                   cameras: FileRecorder, keys: KeyListener) -> str:
+                   cameras: FileRecorder, keys: KeyListener) -> bool:
+    """Record one episode. Returns True if the operator asked to quit."""
     ep_dir.mkdir(parents=True)
     period = 1.0 / CONTROL_HZ
 
     q: queue.Queue = queue.Queue()
     writer = threading.Thread(target=_writer_thread, args=(ep_dir / "joints.jsonl", q), daemon=True)
     writer.start()
-    cameras.start(ep_dir)
-
-    # ONE monotonic clock, in ONE process; everything else is an offset (§3.5).
-    t0_mono = time.monotonic()
-    t0_unix = time.time()
-    print(f"[{ep_dir.name}] recording — [g]ood  [d]iscard  [q]uit")
 
     status = None
+    quit_requested = False
     i = 0
-    while status is None:
-        state = follower.read_positions()
-        action = leader.read_positions()
-        follower.write_positions(action)
-        q.put({"t": round(time.monotonic() - t0_mono, 4),
-               "state": state.tolist(), "action": action.tolist()})
+    try:
+        cameras.start(ep_dir)
 
-        key = keys.poll()
-        if key in ("g", "d", "q"):
-            status = {"g": "good", "d": "discard", "q": "quit"}[key]
+        # ONE monotonic clock, in ONE process; everything else is an offset (§3.5).
+        t0_mono = time.monotonic()
+        t0_unix = time.time()
+        print(f"[{ep_dir.name}] recording — [g]ood  [d]iscard  [q]uit")
 
-        i += 1
-        target = t0_mono + i * period
-        sleep = target - time.monotonic()
-        if sleep > 0:
-            time.sleep(sleep)
+        while status is None:
+            state = follower.read_positions()
+            action = leader.read_positions()
+            follower.write_positions(action)
+            q.put({"t": round(time.monotonic() - t0_mono, 4),
+                   "state": state.tolist(), "action": action.tolist()})
 
-    cameras.stop()
-    q.put(None)
-    writer.join()
+            key = keys.poll()
+            if key in ("g", "d"):
+                status = {"g": "good", "d": "discard"}[key]
+            elif key == "q":
+                quit_requested = True
+                break
 
-    final = "discard" if status == "discard" else "good"
-    write_meta(ep_dir, Meta(t0_monotonic=t0_mono, t0_unix=t0_unix, fps=CONTROL_HZ, task=task, status=final))
-    print(f"[{ep_dir.name}] {i} ticks, status={final}")
-    return status
+            i += 1
+            target = t0_mono + i * period
+            sleep = target - time.monotonic()
+            if sleep > 0:
+                time.sleep(sleep)
+    finally:
+        # A servo dropout must not leave ffmpeg orphaned: it keeps appending to this
+        # episode's .mkv forever and holds the device against every later episode.
+        cameras.stop()
+        q.put(None)
+        writer.join()
+
+    if status is None:
+        print(f"[{ep_dir.name}] stopped — keep it? [g]ood  [d]iscard")
+        status = "good" if keys.wait("gd") == "g" else "discard"
+
+    write_meta(ep_dir, Meta(t0_monotonic=t0_mono, t0_unix=t0_unix, fps=CONTROL_HZ, task=task, status=status))
+    print(f"[{ep_dir.name}] {i} ticks, status={status}")
+    return quit_requested
 
 
 def main():
@@ -193,14 +218,20 @@ def main():
     keys = KeyListener()
     try:
         while True:
+            print("[session] [s]tart recording  [q]uit")
+            if keys.wait("sq") == "q":
+                break
             idx = next_episode_index(session_dir)
-            status = record_episode(episode_dir(session_dir, idx), args.task,
-                                    follower, leader, cameras, keys)
-            if status == "quit":
+            if record_episode(episode_dir(session_dir, idx), args.task,
+                              follower, leader, cameras, keys):
                 break
     finally:
         keys.restore()
-        follower.disable_torque()
+        try:
+            follower.disable_torque()
+        except ConnectionError as e:
+            # Bus is already dead; say so instead of masking why we got here.
+            print(f"[session] follower torque NOT released: {e}")
         follower.close()
         leader.close()
     print("[session] done")

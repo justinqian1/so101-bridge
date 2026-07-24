@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from common.schema import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH
@@ -58,23 +59,28 @@ class FileRecorder:
                 "-f", "matroska",
                 out,
             ]
-            self._procs[name] = subprocess.Popen(cmd)
+            self._procs[name] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             outputs[name] = out
+        # A busy device (e.g. an orphaned recorder from a crashed run) makes ffmpeg exit
+        # at once; without this the session records joints and no video, silently.
+        time.sleep(0.5)
+        dead = sorted(n for n, p in self._procs.items() if p.poll() is not None)
+        if dead:
+            self.stop()
+            raise RuntimeError(f"camera recorder exited immediately: {', '.join(dead)}")
         return outputs
 
     def stop(self) -> None:
-        """Send 'q' for a clean Matroska trailer, then wait; kill if it hangs."""
+        """SIGTERM: ffmpeg writes the Matroska trailer on it; kill if it hangs."""
         for proc in self._procs.values():
             if proc.poll() is None:
-                try:
-                    proc.communicate(b"q", timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.terminate()
+                proc.terminate()
         for proc in self._procs.values():
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
         self._procs.clear()
 
 

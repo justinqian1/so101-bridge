@@ -13,7 +13,7 @@ dependencies = []
 # Pi robot-side. NEVER pull torch/opencv/lerobot/av transitively — see SPEC §0.
 pi      = ["pyserial", "feetech-servo-sdk", "pyzmq", "numpy"]
 # Desktop host. Pin LeRobot exactly; upgrade deliberately, never `pip install -U`.
-desktop = ["lerobot[feetech]>=0.6.0", "torch", "av", "pillow", "pyzmq", "numpy"]
+desktop = ["lerobot[feetech]==0.6.0", "lerobot[dataset]==0.6.0", "torch", "av", "pillow", "pyzmq", "numpy"]
 
 [tool.setuptools]
 packages = ["common", "pi", "desktop"]
