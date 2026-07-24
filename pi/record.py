@@ -112,18 +112,11 @@ def _log_throttled() -> None:
         pass
 
 
-def _parse_cam(spec: str) -> tuple[str, str]:
-    name, _, device = spec.partition("=")
-    if not device:
-        raise argparse.ArgumentTypeError(f"--cam expects name=device, got '{spec}'")
-    return name, device
-
-
 # ── one episode ──────────────────────────────────────────────────────────────
 
 def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus,
-                   cameras: FileRecorder, keys: KeyListener) -> bool:
-    """Record one episode. Returns True if the operator asked to quit."""
+                   cameras: FileRecorder, keys: KeyListener) -> None:
+    """Record one episode until [s]top (or [q], which behaves like [s] mid-recording)."""
     ep_dir.mkdir(parents=True)
     period = 1.0 / CONTROL_HZ
 
@@ -131,8 +124,6 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
     writer = threading.Thread(target=_writer_thread, args=(ep_dir / "joints.jsonl", q), daemon=True)
     writer.start()
 
-    status = None
-    quit_requested = False
     i = 0
     try:
         cameras.start(ep_dir)
@@ -140,20 +131,18 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
         # ONE monotonic clock, in ONE process; everything else is an offset (§3.5).
         t0_mono = time.monotonic()
         t0_unix = time.time()
-        print(f"[{ep_dir.name}] recording — [g]ood  [d]iscard  [q]uit")
+        print(f"[{ep_dir.name}] recording — [s]top")
 
-        while status is None:
+        stopped = False
+        while not stopped:
             state = follower.read_positions()
             action = leader.read_positions()
             follower.write_positions(action)
             q.put({"t": round(time.monotonic() - t0_mono, 4),
                    "state": state.tolist(), "action": action.tolist()})
 
-            key = keys.poll()
-            if key in ("g", "d"):
-                status = {"g": "good", "d": "discard"}[key]
-            elif key == "q":
-                quit_requested = True
+            if keys.poll() in ("s", "q"):
+                stopped = True
                 break
 
             i += 1
@@ -168,27 +157,27 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
         q.put(None)
         writer.join()
 
-    if status is None:
-        print(f"[{ep_dir.name}] stopped — keep it? [g]ood  [d]iscard")
-        status = "good" if keys.wait("gd") == "g" else "discard"
+    print(f"[{ep_dir.name}] stopped — [k]eep  [d]iscard")
+    status = "keep" if keys.wait("kd") == "k" else "discard"
 
     write_meta(ep_dir, Meta(t0_monotonic=t0_mono, t0_unix=t0_unix, fps=CONTROL_HZ, task=task, status=status))
     print(f"[{ep_dir.name}] {i} ticks, status={status}")
-    return quit_requested
 
 
 def main():
     ap = argparse.ArgumentParser(description="SO-101 teleop capture.")
     ap.add_argument("--task", required=True, help="Task description, e.g. 'pick_cube'")
-    ap.add_argument("--cam", action="append", type=_parse_cam, default=[],
-                    help="name=/dev/v4l/by-id/...  (repeatable)")
     ap.add_argument("--out", default="sessions", help="Sessions root directory")
     ap.add_argument("--robot-id", default="so101")
     ap.add_argument("--follower-calib", default="calibration/so101_follower.json")
     ap.add_argument("--leader-calib", default="calibration/so101_leader.json")
     args = ap.parse_args()
 
-    cameras_cfg = dict(args.cam)
+    # Fixed device aliases from port-alias-setup.md — not configurable per-run.
+    cameras_cfg = {
+        "ext": "/dev/v4l/by-id/cam-ext",
+        "wrist": "/dev/v4l/by-id/cam-wrist",
+    }
     _log_throttled()
 
     follower = ServoBus("/dev/so101-follower", load_calibration(args.follower_calib))
@@ -222,9 +211,8 @@ def main():
             if keys.wait("sq") == "q":
                 break
             idx = next_episode_index(session_dir)
-            if record_episode(episode_dir(session_dir, idx), args.task,
-                              follower, leader, cameras, keys):
-                break
+            record_episode(episode_dir(session_dir, idx), args.task,
+                           follower, leader, cameras, keys)
     finally:
         keys.restore()
         try:

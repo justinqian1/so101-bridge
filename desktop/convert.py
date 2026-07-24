@@ -32,7 +32,7 @@ from common.schema import (
     JOINTS,
     STATE,
     image_key,
-    iter_good_episodes,
+    iter_kept_episodes,
     read_joints_jsonl,
     read_meta,
 )
@@ -152,7 +152,7 @@ def main():
         root=args.root, robot_type=session.get("robot_id", "so101"), use_videos=True,
     )
 
-    for _, ep_dir in iter_good_episodes(session_dir):
+    for _, ep_dir in iter_kept_episodes(session_dir):
         convert_episode(dataset, ep_dir, cams, read_meta(ep_dir).task, args.cam_offset)
 
     dataset.finalize()

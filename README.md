@@ -38,7 +38,7 @@ python -m pi.calibrate --arm leader
 
 # 2. Record teleop episodes.
 python -m pi.record --task pick_cube
-#   Press: s = start recording; g = keep (good); d = discard; q = quit
+#   Press: s = start or stop recording; k = keep; d = discard; q = quit
 
 # 3. Convert on the desktop and CHECK alignment before recording 200 more.
 python -m desktop.convert --session sessions/2026-07-23_pick_cube \
@@ -48,8 +48,7 @@ python -m desktop.convert --session sessions/2026-07-23_pick_cube \
 
 # 5. Inference (last).
 python -m desktop.serve  --checkpoint ./checkpoints/pick_cube --device cuda   # desktop
-python -m pi.run_policy  --server DESKTOP_TS_IP:5555 \
-    --cam top=/dev/v4l/by-id/CAM_TOP --cam wrist=/dev/v4l/by-id/CAM_WRIST     # Pi
+python -m pi.run_policy  --server DESKTOP_TS_IP:5555                         # Pi
 ```
 
 The `calibration/*.json` files committed here are **placeholders** (identity ranges).

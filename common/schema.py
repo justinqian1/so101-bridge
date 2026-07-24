@@ -62,7 +62,7 @@ class Meta:
     t0_unix: float
     fps: int
     task: str
-    status: str  # "good" | "discard"
+    status: str  # "keep" | "discard"
 
 
 def episode_dir(session_dir: Path, index: int) -> Path:
@@ -85,13 +85,13 @@ def read_meta(ep_dir: Path) -> Meta:
     return Meta(**d)
 
 
-def iter_good_episodes(session_dir: Path):
-    """Yield (index, ep_dir) for episodes marked good, in order."""
+def iter_kept_episodes(session_dir: Path):
+    """Yield (index, ep_dir) for episodes marked kept, in order."""
     for ep_dir in sorted(Path(session_dir).glob("episode_*")):
         meta_path = ep_dir / "meta.json"
         if not meta_path.exists():
             continue
-        if json.loads(meta_path.read_text()).get("status") == "good":
+        if json.loads(meta_path.read_text()).get("status") == "kept":
             index = int(ep_dir.name.split("_")[1])
             yield index, ep_dir
 

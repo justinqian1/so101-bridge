@@ -100,7 +100,6 @@ def read_state_or_halt(bus: ServoBus) -> np.ndarray:
 def main():
     ap = argparse.ArgumentParser(description="SO-101 remote inference client.")
     ap.add_argument("--server", required=True, help="host:port of desktop policy server")
-    ap.add_argument("--cam", action="append", default=[], help="name=/dev/v4l/by-id/... (repeatable)")
     ap.add_argument("--calib", default="calibration/so101_follower.json")
     ap.add_argument("--timeout-ms", type=int, default=500)
     ap.add_argument("--requery-at", type=int, default=15,
@@ -110,7 +109,11 @@ def main():
     host = args.server.split(":")[0]
     check_tailscale_direct(host)
 
-    cameras = dict(c.split("=", 1) for c in args.cam)
+    # Fixed device aliases from port-alias-setup.md — not configurable per-run.
+    cameras = {
+        "ext": "/dev/v4l/by-id/cam-ext",
+        "wrist": "/dev/v4l/by-id/cam-wrist",
+    }
     streams = open_streams(cameras)
     bus = ServoBus("/dev/so101-follower", load_calibration(args.calib))
     bus.connect()
