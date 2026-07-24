@@ -1,12 +1,7 @@
 # so101-bridge
 
-Data capture and remote VLA inference for an SO-101 arm. A Raspberry Pi 5 is the
-robot-side machine; a GPU desktop does dataset writing, training, and inference. See
-[SPEC.md](SPEC.md) for the full design.
-
-**Governing rule (§0): the Pi never decodes an image and never imports torch.** JPEG
-bytes go straight from camera to disk (capture) or onto the wire (inference). No
-`opencv`, `lerobot`, `torch`, or `av` in the `[pi]` dependency set.
+Data capture and remote VLA inference for an SO-101 arm. A Raspberry Pi is the
+robot-side machine; a GPU desktop does dataset writing, training, and inference. This repo is a workaround to the Pi having insufficient RAM to load the LeRobot module.
 
 ## Install
 
@@ -32,48 +27,35 @@ pip install -e .[desktop]   # on the GPU desktop
 | `desktop/serve.py` | desktop | policy server |
 | `tests/latency_probe.py` | either | go/no-go for the dumb-bridge design |
 
-## Before you build (§7 hazards)
+## Build / run order
 
-```bash
-v4l2-ctl --device /dev/video0 --list-formats-ext   # confirm native MJPEG @ 640x480/30
-vcgencmd get_throttled                              # 0x0 == healthy power
-```
-
-Record to a **USB SSD**, not the boot SD card. Address cameras by
-`/dev/v4l/by-id/...`, which is stable across reboots.
-
-## Build / run order (§9)
+First do the [port alias setup](port-alias-setup.md) (one time) — downstream scripts rely on those aliases.
 
 ```bash
 # 1. Calibrate each arm (overwrites the placeholder JSONs in calibration/).
-python -m pi.calibrate --arm follower --port /dev/ttyACM0
-python -m pi.calibrate --arm leader   --port /dev/ttyACM1
+python -m pi.calibrate --arm follower
+python -m pi.calibrate --arm leader
 
-# 2. Latency probe BEFORE writing/using inference — answers a design question cheaply.
-python tests/latency_probe.py --port /dev/ttyACM0 --ids 1,2,3,4,5,6 --duration 60
-
-# 3. Record teleop episodes.
-python -m pi.record --task pick_cube \
-    --follower-port /dev/ttyACM0 --leader-port /dev/ttyACM1 \
-    --cam top=/dev/v4l/by-id/CAM_TOP --cam wrist=/dev/v4l/by-id/CAM_WRIST
+# 2. Record teleop episodes.
+python -m pi.record --task pick_cube
 #   Per episode, press:  g = keep (good)   d = discard   q = keep + quit
 
-# 4. Convert on the desktop and CHECK alignment before recording 200 more.
+# 3. Convert on the desktop and CHECK alignment before recording 200 more.
 python -m desktop.convert --session sessions/2026-07-23_pick_cube \
     --repo-id you/so101_pick_cube --root ./data/so101_pick_cube
 
-# 5. Train with stock LeRobot (desktop).
+# 4. Train with stock LeRobot (desktop).
 
-# 6. Inference (last).
+# 5. Inference (last).
 python -m desktop.serve  --checkpoint ./checkpoints/pick_cube --device cuda   # desktop
-python -m pi.run_policy  --server DESKTOP_TS_IP:5555 --port /dev/ttyACM0 \
+python -m pi.run_policy  --server DESKTOP_TS_IP:5555 \
     --cam top=/dev/v4l/by-id/CAM_TOP --cam wrist=/dev/v4l/by-id/CAM_WRIST     # Pi
 ```
 
 The `calibration/*.json` files committed here are **placeholders** (identity ranges).
 Run `pi/calibrate.py` to generate real ones before recording.
 
-## Conventions frozen on day one (§2)
+## Conventions frozen
 
 - `action` = **leader** position (commanded), `observation.state` = **follower**
   position (what happened). Swapping them trains without error and yields a useless

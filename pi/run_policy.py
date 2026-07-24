@@ -100,7 +100,6 @@ def read_state_or_halt(bus: ServoBus) -> np.ndarray:
 def main():
     ap = argparse.ArgumentParser(description="SO-101 remote inference client.")
     ap.add_argument("--server", required=True, help="host:port of desktop policy server")
-    ap.add_argument("--port", required=True, help="Follower servo bus port")
     ap.add_argument("--cam", action="append", default=[], help="name=/dev/v4l/by-id/... (repeatable)")
     ap.add_argument("--calib", default="calibration/so101_follower.json")
     ap.add_argument("--timeout-ms", type=int, default=500)
@@ -113,7 +112,7 @@ def main():
 
     cameras = dict(c.split("=", 1) for c in args.cam)
     streams = open_streams(cameras)
-    bus = ServoBus(args.port, load_calibration(args.calib))
+    bus = ServoBus("/dev/so101-follower", load_calibration(args.calib))
     bus.connect()
     bus.configure()
     bus.enable_torque()

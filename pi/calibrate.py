@@ -118,7 +118,6 @@ def calibrate(port: str, full_turn_motor: str | None) -> dict[str, MotorCalibrat
 def main():
     ap = argparse.ArgumentParser(description="Calibrate one SO-101 arm.")
     ap.add_argument("--arm", required=True, choices=["follower", "leader"])
-    ap.add_argument("--port", required=True, help="Servo bus port, e.g. /dev/ttyACM0")
     ap.add_argument("--out", default="calibration", help="Output directory")
     # Leader wrist_roll spins freely (full turn); follower's is range-limited.
     ap.add_argument("--full-turn", default=None,
@@ -126,7 +125,7 @@ def main():
     args = ap.parse_args()
 
     full_turn = args.full_turn or ("wrist_roll" if args.arm == "leader" else None)
-    cal = calibrate(args.port, full_turn)
+    cal = calibrate(f"/dev/so101-{args.arm}", full_turn)
 
     out_path = Path(args.out) / f"so101_{args.arm}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)

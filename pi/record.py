@@ -155,8 +155,6 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
 def main():
     ap = argparse.ArgumentParser(description="SO-101 teleop capture.")
     ap.add_argument("--task", required=True, help="Task description, e.g. 'pick_cube'")
-    ap.add_argument("--follower-port", required=True)
-    ap.add_argument("--leader-port", required=True)
     ap.add_argument("--cam", action="append", type=_parse_cam, default=[],
                     help="name=/dev/v4l/by-id/...  (repeatable)")
     ap.add_argument("--out", default="sessions", help="Sessions root directory")
@@ -168,8 +166,8 @@ def main():
     cameras_cfg = dict(args.cam)
     _log_throttled()
 
-    follower = ServoBus(args.follower_port, load_calibration(args.follower_calib))
-    leader = ServoBus(args.leader_port, load_calibration(args.leader_calib))
+    follower = ServoBus("/dev/so101-follower", load_calibration(args.follower_calib))
+    leader = ServoBus("/dev/so101-leader", load_calibration(args.leader_calib))
     follower.connect()
     leader.connect()
     follower.configure()
