@@ -103,13 +103,14 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def _log_throttled() -> None:
+def _warn_if_throttled() -> None:
     # Undervoltage shows up as random USB dropouts that look like software bugs (§7).
     try:
         out = subprocess.check_output(["vcgencmd", "get_throttled"], text=True).strip()
-        print(f"[session] {out}")
     except Exception:
-        pass
+        return
+    if out.partition("=")[2] not in ("0x0", ""):
+        print(f"[session] WARNING: {out} — undervoltage/throttling drops servo bus packets")
 
 
 # ── one episode ──────────────────────────────────────────────────────────────
@@ -178,7 +179,7 @@ def main():
         "ext": "/dev/v4l/by-id/cam-ext",
         "wrist": "/dev/v4l/by-id/cam-wrist",
     }
-    _log_throttled()
+    _warn_if_throttled()
 
     follower = ServoBus("/dev/so101-follower", load_calibration(args.follower_calib))
     leader = ServoBus("/dev/so101-leader", load_calibration(args.leader_calib))

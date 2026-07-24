@@ -10,6 +10,8 @@ Pi-side. Depends only on numpy + feetech-servo-sdk (`scservo_sdk`). No torch, no
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import numpy as np
 import scservo_sdk as scs
 
@@ -36,6 +38,24 @@ PHASE = (18, 1)
 
 DEFAULT_BAUDRATE = 1_000_000
 POSITION_MODE = 0
+
+# Single-register ops only run at startup (calibration, configure, torque latch), where a
+# servo may still be settling or busy committing EEPROM and blows past the SDK's stock
+# ~34 ms reply window. LATENCY_TIMER is a module global re-read by
+# PortHandler.setPacketTimeout on every transaction, so widening the window means
+# overriding it there; the sync-read/write hot path keeps the stock timing.
+STARTUP_LATENCY_MS = 100
+STARTUP_RETRIES = 2
+
+
+@contextmanager
+def _patient_rx():
+    old = scs.port_handler.LATENCY_TIMER
+    scs.port_handler.LATENCY_TIMER = STARTUP_LATENCY_MS
+    try:
+        yield
+    finally:
+        scs.port_handler.LATENCY_TIMER = old
 
 
 class ServoBus:
@@ -77,23 +97,36 @@ class ServoBus:
 
     # ── register helpers ─────────────────────────────────────────────────────
 
+    # Every one of these registers takes an idempotent value, so a retry can only repeat
+    # a write that may already have landed — never compound it.
+
     def _write_reg(self, reg: tuple[int, int], id_: int, value: int) -> None:
         addr, size = reg
-        if size == 1:
-            comm, err = self._packet.write1ByteTxRx(self._port, id_, addr, value)
-        else:
-            comm, err = self._packet.write2ByteTxRx(self._port, id_, addr, value)
-        if comm != scs.COMM_SUCCESS or err != 0:
-            raise ConnectionError(f"write reg {reg} id={id_}: {self._packet.getTxRxResult(comm)}")
+        write = self._packet.write1ByteTxRx if size == 1 else self._packet.write2ByteTxRx
+        with _patient_rx():
+            for _ in range(STARTUP_RETRIES + 1):
+                comm, err = write(self._port, id_, addr, value)
+                if comm == scs.COMM_SUCCESS:
+                    break
+            else:
+                raise ConnectionError(f"write reg {reg} id={id_}: {self._packet.getTxRxResult(comm)}")
+        # A servo-reported fault (overload, voltage) is not a dropped frame — retrying
+        # would just hide it, and getTxRxResult would call it a success.
+        if err != 0:
+            raise ConnectionError(f"write reg {reg} id={id_}: {self._packet.getRxPacketError(err)}")
 
     def _read_reg(self, reg: tuple[int, int], id_: int) -> int:
         addr, size = reg
-        if size == 1:
-            value, comm, err = self._packet.read1ByteTxRx(self._port, id_, addr)
-        else:
-            value, comm, err = self._packet.read2ByteTxRx(self._port, id_, addr)
-        if comm != scs.COMM_SUCCESS or err != 0:
-            raise ConnectionError(f"read reg {reg} id={id_}: {self._packet.getTxRxResult(comm)}")
+        read = self._packet.read1ByteTxRx if size == 1 else self._packet.read2ByteTxRx
+        with _patient_rx():
+            for _ in range(STARTUP_RETRIES + 1):
+                value, comm, err = read(self._port, id_, addr)
+                if comm == scs.COMM_SUCCESS:
+                    break
+            else:
+                raise ConnectionError(f"read reg {reg} id={id_}: {self._packet.getTxRxResult(comm)}")
+        if err != 0:
+            raise ConnectionError(f"read reg {reg} id={id_}: {self._packet.getRxPacketError(err)}")
         return value
 
     # ── configuration ────────────────────────────────────────────────────────
@@ -101,6 +134,10 @@ class ServoBus:
     def write_calibration(self) -> None:
         """Push homing offset + position limits to each motor so Present_Position is
         already homed. Then reads normalise against range_min/range_max directly."""
+        # All three are EEPROM registers. A run that died between enable_torque() and its
+        # cleanup leaves motors torqued with LOCK=1, and a locked servo acknowledges these
+        # writes without committing them — silently keeping the old calibration.
+        self.disable_torque()
         for joint, id_ in zip(JOINTS, self.ids):
             c = self.calibration[joint]
             self._write_reg(HOMING_OFFSET, id_, cal.encode_sign_magnitude(c.homing_offset, cal.HOMING_OFFSET_SIGN_BIT))
