@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "so101-bridge"
+version = "0.1.0"
+description = "Data capture and remote VLA inference for an SO-101 arm, Raspberry Pi 5 robot-side + GPU desktop host."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# Pi robot-side. NEVER pull torch/opencv/lerobot/av transitively — see SPEC §0.
+pi      = ["pyserial", "feetech-servo-sdk", "pyzmq", "numpy"]
+# Desktop host. Pin LeRobot exactly; upgrade deliberately, never `pip install -U`.
+desktop = ["lerobot[feetech]>=0.6.0", "torch", "av", "pillow", "pyzmq", "numpy"]
+
+[tool.setuptools]
+packages = ["common", "pi", "desktop"]
