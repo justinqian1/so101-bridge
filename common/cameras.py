@@ -14,13 +14,64 @@ from __future__ import annotations
 
 import subprocess
 import threading
-import time
 from pathlib import Path
 
 from common.schema import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH
 
 SOI = b"\xff\xd8"  # JPEG start-of-image
 EOI = b"\xff\xd9"  # JPEG end-of-image
+
+
+# Locked capture controls, applied before every stream start (§3.2).
+#
+# Every automatic algorithm on these cameras converges over seconds and re-hunts
+# mid-episode. ext's continuous autofocus takes ~3.2s to settle — a defocused frame
+# compresses to ~23% of its sharp size — and its re-hunts produce the oversized frame
+# that precedes every dropped-frame event. wrist's auto-exposure takes 2.4–5.3s. Both
+# ship with exposure_dynamic_framerate=1 (non-default), which lets the camera lower its
+# frame rate to buy exposure time. Locked, there is nothing to converge: frame 1 matches
+# frame 500, and capture matches inference.
+#
+# Applied one control per call: v4l2-ctl batches a single invocation into one
+# VIDIOC_S_EXT_CTRLS, where a dependent control can be evaluated before the automatic
+# it depends on is off. Order matters — each `*_automatic` must precede its value.
+CONTROLS = {
+    "ext": [
+        ("exposure_dynamic_framerate", 0),
+        ("power_line_frequency", 2),          # 2 = 60 Hz
+        ("focus_automatic_continuous", 0),
+        ("focus_absolute", 0),                # MEASURE: see README, scene-dependent
+        ("white_balance_automatic", 0),
+        ("white_balance_temperature", 4000),
+        ("auto_exposure", 1),                 # 1 = manual
+        ("exposure_time_absolute", 250),
+        ("gain", 0),
+    ],
+    "wrist": [
+        ("exposure_dynamic_framerate", 0),
+        ("power_line_frequency", 2),
+        ("white_balance_automatic", 0),
+        ("white_balance_temperature", 4600),
+        ("auto_exposure", 1),
+        ("exposure_time_absolute", 157),      # MEASURE: see README, scene-dependent
+        ("gain", 0),
+    ],
+}
+
+
+def apply_controls(name: str, device: str) -> None:
+    """Freeze exposure/focus/white balance so nothing converges mid-episode."""
+    for control, value in CONTROLS[name]:
+        result = subprocess.run(
+            ["v4l2-ctl", "-d", device, "-c", f"{control}={value}"],
+            capture_output=True, text=True,
+        )
+        # An unlocked camera silently produces a different image distribution than the
+        # one the policy trained on, so a rejected control is fatal, not a warning.
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"camera '{name}': {control}={value} rejected: {result.stderr.strip()}"
+            )
 
 
 def _base_input_args(device: str) -> list[str]:
@@ -51,24 +102,32 @@ class FileRecorder:
         """Spawn recorders. Returns {name: output_path}."""
         outputs = {}
         for name, device in self.cameras.items():
+            apply_controls(name, device)
             out = str(Path(episode_dir) / f"cam_{name}.mkv")
             cmd = _base_input_args(device) + [
-                # wallclock PTS to align against the joint log after the fact (§3.5).
+                # Unix-epoch PTS to align against the joint log after the fact (§3.5).
+                # -copyts is load-bearing: without it the Matroska muxer rebases the
+                # first PTS to zero and the absolute origin — the only thing tying the
+                # two timelines together — is lost.
                 "-use_wallclock_as_timestamps", "1",
+                "-copyts",
                 "-c:v", "copy",
                 "-f", "matroska",
                 out,
             ]
             self._procs[name] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             outputs[name] = out
-        # A busy device (e.g. an orphaned recorder from a crashed run) makes ffmpeg exit
-        # at once; without this the session records joints and no video, silently.
-        time.sleep(0.5)
+        return outputs
+
+    def check_alive(self) -> None:
+        """Raise if any recorder has exited. Cheap enough to call every control tick.
+
+        A busy device (e.g. an orphaned recorder from a crashed run) makes ffmpeg exit
+        at once; without this the session records joints and no video, silently.
+        """
         dead = sorted(n for n, p in self._procs.items() if p.poll() is not None)
         if dead:
-            self.stop()
-            raise RuntimeError(f"camera recorder exited immediately: {', '.join(dead)}")
-        return outputs
+            raise RuntimeError(f"camera recorder exited: {', '.join(dead)}")
 
     def stop(self) -> None:
         """SIGTERM: ffmpeg writes the Matroska trailer on it; kill if it hangs."""
@@ -104,6 +163,7 @@ class FrameStream:
         self._stop = threading.Event()
 
     def start(self) -> None:
+        apply_controls(self.name, self.device)
         cmd = _base_input_args(self.device) + ["-c:v", "copy", "-f", "image2pipe", "-"]
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
         self._thread = threading.Thread(target=self._reader, daemon=True)

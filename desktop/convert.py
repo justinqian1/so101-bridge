@@ -31,6 +31,7 @@ from common.schema import (
     ACTION,
     JOINTS,
     STATE,
+    Meta,
     image_key,
     iter_kept_episodes,
     read_joints_jsonl,
@@ -39,7 +40,13 @@ from common.schema import (
 
 
 def load_packets(mkv_path: Path) -> tuple[list[float], list[bytes]]:
-    """Demux JPEG packets (no decode). Returns (relative_times, jpeg_bytes) sorted."""
+    """Demux JPEG packets (no decode). Returns (unix_times, jpeg_bytes) sorted.
+
+    PTS are unix-epoch seconds (record.py writes them with -use_wallclock_as_timestamps
+    -copyts). Never rebase to the first frame: ffmpeg's first frame lands a few hundred
+    ms after spawn, by a margin that differs per camera and per episode, so a
+    first-frame-relative timeline has no fixed relationship to the joint log (§3.5).
+    """
     times: list[float] = []
     data: list[bytes] = []
     with av.open(str(mkv_path)) as container:
@@ -49,9 +56,6 @@ def load_packets(mkv_path: Path) -> tuple[list[float], list[bytes]]:
                 continue
             times.append(float(packet.pts * stream.time_base))
             data.append(bytes(packet))
-    if times:
-        t0 = times[0]
-        times = [t - t0 for t in times]  # relative to first frame; align on relative timelines (§3.5)
     return times, data
 
 
@@ -77,15 +81,29 @@ def build_features(cams: list[str]) -> dict:
 
 
 def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
-                    task: str, cam_offset: float) -> None:
+                    meta: Meta, cam_offset: float) -> None:
     ticks = read_joints_jsonl(ep_dir)
-    tick_times = [row["t"] for row in ticks]
+    # Joint t is monotonic-relative; lift it onto the same unix clock as the packets.
+    tick_times = [meta.t0_unix + row["t"] for row in ticks]
 
     # Load each camera's JPEG packet timeline once.
     cam_packets = {c: load_packets(ep_dir / f"cam_{c}.mkv") for c in cams}
     for c, (times, data) in cam_packets.items():
         if not data:
             raise RuntimeError(f"{ep_dir.name}: camera '{c}' produced no frames")
+
+    # Trim ticks to the span every camera actually covers. The cameras take a few
+    # hundred ms to deliver their first frame, so the head of an episode has joint
+    # data and no video; clamping those onto the first frame invents observations
+    # that never happened. Drop them instead, and say how many (§4).
+    lo = max(times[0] for times, _ in cam_packets.values()) - cam_offset
+    hi = min(times[-1] for times, _ in cam_packets.values()) - cam_offset
+    covered = [i for i, t in enumerate(tick_times) if lo <= t <= hi]
+    if not covered:
+        raise RuntimeError(f"{ep_dir.name}: no control tick falls inside camera coverage")
+    head, tail = covered[0], len(ticks) - 1 - covered[-1]
+    ticks = ticks[covered[0]:covered[-1] + 1]
+    tick_times = tick_times[covered[0]:covered[-1] + 1]
 
     # Resample: nearest camera frame per control tick; track alignment error (§4).
     errors: list[float] = []
@@ -100,7 +118,7 @@ def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
         states.append(state)
         actions.append(action)
 
-        frame = {ACTION: action, STATE: state, "task": task}
+        frame = {ACTION: action, STATE: state, "task": meta.task}
         for c in cams:
             times, data = cam_packets[c]
             idx = nearest_index(times, t_tick + cam_offset)
@@ -116,7 +134,8 @@ def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
 
     max_err, med_err = max(errors) * 1000, float(np.median(errors)) * 1000
     flag = "  <-- EXCEEDS half-frame (16ms), investigate before recording more" if max_err > 16 else ""
-    print(f"[{ep_dir.name}] {len(ticks)} frames  align max={max_err:.1f}ms median={med_err:.1f}ms{flag}")
+    trim = f"  trimmed {head} head / {tail} tail ticks (no camera coverage)" if head or tail else ""
+    print(f"[{ep_dir.name}] {len(ticks)} frames  align max={max_err:.1f}ms median={med_err:.1f}ms{trim}{flag}")
 
 
 def _assert_episode(states: np.ndarray, actions: np.ndarray, n_ticks: int,
@@ -153,7 +172,7 @@ def main():
     )
 
     for _, ep_dir in iter_kept_episodes(session_dir):
-        convert_episode(dataset, ep_dir, cams, read_meta(ep_dir).task, args.cam_offset)
+        convert_episode(dataset, ep_dir, cams, read_meta(ep_dir), args.cam_offset)
 
     dataset.finalize()
     print(f"Done -> {dataset.root}")

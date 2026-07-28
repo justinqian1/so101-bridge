@@ -136,6 +136,7 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
 
         stopped = False
         while not stopped:
+            cameras.check_alive()
             state = follower.read_positions()
             action = leader.read_positions()
             follower.write_positions(action)
