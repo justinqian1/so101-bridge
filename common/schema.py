@@ -91,7 +91,7 @@ def iter_kept_episodes(session_dir: Path):
         meta_path = ep_dir / "meta.json"
         if not meta_path.exists():
             continue
-        if json.loads(meta_path.read_text()).get("status") == "kept":
+        if json.loads(meta_path.read_text()).get("status") == "keep":
             index = int(ep_dir.name.split("_")[1])
             yield index, ep_dir
 
