@@ -83,14 +83,26 @@ def build_features(cams: list[str]) -> dict:
 def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
                     meta: Meta, cam_offset: float) -> None:
     ticks = read_joints_jsonl(ep_dir)
-    # Joint t is monotonic-relative; lift it onto the same unix clock as the packets.
-    tick_times = [meta.t0_unix + row["t"] for row in ticks]
 
     # Load each camera's JPEG packet timeline once.
     cam_packets = {c: load_packets(ep_dir / f"cam_{c}.mkv") for c in cams}
     for c, (times, data) in cam_packets.items():
         if not data:
             raise RuntimeError(f"{ep_dir.name}: camera '{c}' produced no frames")
+
+    # Which clock -use_wallclock_as_timestamps lands on is an ffmpeg build detail: some
+    # emit unix epoch, others CLOCK_MONOTONIC (av_gettime vs av_gettime_relative). Both
+    # origins are in meta.json, so pick whichever actually sits next to the packets
+    # rather than trusting either. Joint t is relative to that same origin.
+    first_frame = min(times[0] for times, _ in cam_packets.values())
+    t0 = min((meta.t0_unix, meta.t0_monotonic), key=lambda origin: abs(origin - first_frame))
+    if abs(t0 - first_frame) > 60:
+        raise RuntimeError(
+            f"{ep_dir.name}: camera PTS start at {first_frame:.1f}s, which matches neither "
+            f"t0_unix ({meta.t0_unix:.1f}) nor t0_monotonic ({meta.t0_monotonic:.1f}) — "
+            f"the recording clock is not one this converter understands"
+        )
+    tick_times = [t0 + row["t"] for row in ticks]
 
     # Trim ticks to the span every camera actually covers. The cameras take a few
     # hundred ms to deliver their first frame, so the head of an episode has joint

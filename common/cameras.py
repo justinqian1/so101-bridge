@@ -24,13 +24,6 @@ EOI = b"\xff\xd9"  # JPEG end-of-image
 
 # Locked capture controls, applied before every stream start (§3.2).
 #
-# Every automatic algorithm on these cameras converges over seconds and re-hunts
-# mid-episode. ext's continuous autofocus takes ~3.2s to settle — a defocused frame
-# compresses to ~23% of its sharp size — and its re-hunts produce the oversized frame
-# that precedes every dropped-frame event. wrist's auto-exposure takes 2.4–5.3s. Both
-# ship with exposure_dynamic_framerate=1 (non-default), which lets the camera lower its
-# frame rate to buy exposure time. Locked, there is nothing to converge: frame 1 matches
-# frame 500, and capture matches inference.
 #
 # Applied one control per call: v4l2-ctl batches a single invocation into one
 # VIDIOC_S_EXT_CTRLS, where a dependent control can be evaluated before the automatic
@@ -40,20 +33,20 @@ CONTROLS = {
         ("exposure_dynamic_framerate", 0),
         ("power_line_frequency", 2),          # 2 = 60 Hz
         ("focus_automatic_continuous", 0),
-        ("focus_absolute", 0),                # MEASURE: see README, scene-dependent
+        ("focus_absolute", 50),
         ("white_balance_automatic", 0),
         ("white_balance_temperature", 4000),
         ("auto_exposure", 1),                 # 1 = manual
-        ("exposure_time_absolute", 250),
-        ("gain", 0),
+        ("exposure_time_absolute", 166),
+        ("gain", 150),
     ],
     "wrist": [
         ("exposure_dynamic_framerate", 0),
         ("power_line_frequency", 2),
         ("white_balance_automatic", 0),
-        ("white_balance_temperature", 4600),
+        ("white_balance_temperature", 3500),
         ("auto_exposure", 1),
-        ("exposure_time_absolute", 157),      # MEASURE: see README, scene-dependent
+        ("exposure_time_absolute", 157),
         ("gain", 0),
     ],
 }
