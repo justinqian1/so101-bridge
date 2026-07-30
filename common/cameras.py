@@ -33,20 +33,20 @@ CONTROLS = {
         ("exposure_dynamic_framerate", 0),
         ("power_line_frequency", 2),          # 2 = 60 Hz
         ("focus_automatic_continuous", 0),
-        ("focus_absolute", 50),
+        ("focus_absolute", 30),
         ("white_balance_automatic", 0),
-        ("white_balance_temperature", 4000),
+        ("white_balance_temperature", 2500),
         ("auto_exposure", 1),                 # 1 = manual
-        ("exposure_time_absolute", 166),
-        ("gain", 150),
+        ("exposure_time_absolute", 156),      # C920 allows only 77/156/312
+        ("gain", 35),
     ],
     "wrist": [
         ("exposure_dynamic_framerate", 0),
         ("power_line_frequency", 2),
         ("white_balance_automatic", 0),
-        ("white_balance_temperature", 3500),
+        ("white_balance_temperature", 3300),
         ("auto_exposure", 1),
-        ("exposure_time_absolute", 157),
+        ("exposure_time_absolute", 200),
         ("gain", 0),
     ],
 }
