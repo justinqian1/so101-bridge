@@ -81,7 +81,7 @@ def build_features(cams: list[str]) -> dict:
 
 
 def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
-                    meta: Meta, cam_offset: float) -> None:
+                    meta: Meta, cam_offset: float, task: str) -> None:
     ticks = read_joints_jsonl(ep_dir)
 
     # Load each camera's JPEG packet timeline once.
@@ -113,7 +113,6 @@ def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
     covered = [i for i, t in enumerate(tick_times) if lo <= t <= hi]
     if not covered:
         raise RuntimeError(f"{ep_dir.name}: no control tick falls inside camera coverage")
-    head, tail = covered[0], len(ticks) - 1 - covered[-1]
     ticks = ticks[covered[0]:covered[-1] + 1]
     tick_times = tick_times[covered[0]:covered[-1] + 1]
 
@@ -130,7 +129,7 @@ def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
         states.append(state)
         actions.append(action)
 
-        frame = {ACTION: action, STATE: state, "task": meta.task}
+        frame = {ACTION: action, STATE: state, "task": task}
         for c in cams:
             times, data = cam_packets[c]
             idx = nearest_index(times, t_tick + cam_offset)
@@ -145,9 +144,7 @@ def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
     dataset.save_episode()
 
     max_err, med_err = max(errors) * 1000, float(np.median(errors)) * 1000
-    flag = "  <-- EXCEEDS half-frame (16ms), investigate before recording more" if max_err > 16 else ""
-    trim = f"  trimmed {head} head / {tail} tail ticks (no camera coverage)" if head or tail else ""
-    print(f"[{ep_dir.name}] {len(ticks)} frames  align max={max_err:.1f}ms median={med_err:.1f}ms{trim}{flag}")
+    print(f"[{ep_dir.name}] {len(ticks)} frames  align max={max_err:.1f}ms median={med_err:.1f}ms")
 
 
 def _assert_episode(states: np.ndarray, actions: np.ndarray, n_ticks: int,
@@ -183,8 +180,10 @@ def main():
         root=args.root, robot_type=session.get("robot_id", "so101"), use_videos=True,
     )
 
+    task = input("Enter a natural-language description of your task (press Enter when done): ").strip()
+
     for _, ep_dir in iter_kept_episodes(session_dir):
-        convert_episode(dataset, ep_dir, cams, read_meta(ep_dir), args.cam_offset)
+        convert_episode(dataset, ep_dir, cams, read_meta(ep_dir), args.cam_offset, task)
 
     dataset.finalize()
     print(f"Done -> {dataset.root}")
