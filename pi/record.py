@@ -126,12 +126,12 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
     writer.start()
 
     i = 0
+    # ONE monotonic clock, in ONE process; everything else is an offset (§3.5).
+    # Captured before cameras.start() so a crash mid-setup still has a t0 to write.
+    t0_mono = time.monotonic()
+    t0_unix = time.time()
     try:
         cameras.start(ep_dir)
-
-        # ONE monotonic clock, in ONE process; everything else is an offset (§3.5).
-        t0_mono = time.monotonic()
-        t0_unix = time.time()
         print(f"[{ep_dir.name}] recording — [s]top")
 
         stopped = False
@@ -152,6 +152,11 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
             sleep = target - time.monotonic()
             if sleep > 0:
                 time.sleep(sleep)
+    except Exception as e:
+        print(f"[{ep_dir.name}] crashed: {e!r} — discarding")
+        write_meta(ep_dir, Meta(t0_monotonic=t0_mono, t0_unix=t0_unix,
+                                fps=CONTROL_HZ, task=task, status="discard"))
+        raise
     finally:
         # A servo dropout must not leave ffmpeg orphaned: it keeps appending to this
         # episode's .mkv forever and holds the device against every later episode.
@@ -164,6 +169,29 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
 
     write_meta(ep_dir, Meta(t0_monotonic=t0_mono, t0_unix=t0_unix, fps=CONTROL_HZ, task=task, status=status))
     print(f"[{ep_dir.name}] {i} ticks, status={status}")
+
+
+RECONNECT_ATTEMPTS = 8
+RECONNECT_DELAY_S = 0.5
+
+
+def _reconnect(follower: ServoBus, leader: ServoBus) -> bool:
+    """Close + reopen both buses after a crash. Most dropouts are a transient USB hiccup
+    that clears within a second or two, so retry a handful of times before giving up."""
+    for attempt in range(1, RECONNECT_ATTEMPTS + 1):
+        try:
+            follower.close()
+            leader.close()
+            follower.connect()
+            follower.configure()
+            follower.enable_torque()
+            leader.connect()
+            leader.disable_torque()
+            return True
+        except Exception as e:
+            print(f"[session] reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} failed: {e!r}")
+            time.sleep(RECONNECT_DELAY_S)
+    return False
 
 
 def main():
@@ -213,8 +241,15 @@ def main():
             if keys.wait("sq") == "q":
                 break
             idx = next_episode_index(session_dir)
-            record_episode(episode_dir(session_dir, idx), args.task,
-                           follower, leader, cameras, keys)
+            try:
+                record_episode(episode_dir(session_dir, idx), args.task,
+                               follower, leader, cameras, keys)
+            except Exception:
+                print("[session] attempting to reconnect...")
+                if not _reconnect(follower, leader):
+                    print("[session] reconnect failed — exiting")
+                    raise
+                print("[session] reconnected")
     finally:
         keys.restore()
         try:

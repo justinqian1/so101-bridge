@@ -163,27 +163,38 @@ def _assert_episode(states: np.ndarray, actions: np.ndarray, n_ticks: int,
 
 def main():
     ap = argparse.ArgumentParser(description="Convert a capture session to a LeRobotDataset.")
-    ap.add_argument("--session", required=True, help="Session dir, e.g. sessions/2026-07-23_pick_cube")
+    ap.add_argument("--session", required=True, nargs="+",
+                    help="One or more session dirs, sharing cams, fps, and task.")
     ap.add_argument("--repo-id", required=True, help="e.g. yourname/so101_pick_cube")
     ap.add_argument("--root", default=None, help="Local dataset dir (default: HF cache)")
     ap.add_argument("--cam-offset", type=float, default=0.0,
                     help="Seconds to shift camera timeline vs joints (verify empirically once, §3.5)")
     args = ap.parse_args()
 
-    session_dir = Path(args.session)
-    session = json.loads((session_dir / "session.json").read_text())
-    cams = list(session["cameras"].keys())
-    fps = session.get("fps", 30)
+    session_dirs = [Path(s) for s in args.session]
+    sessions = [json.loads((d / "session.json").read_text()) for d in session_dirs]
+
+    cams = list(sessions[0]["cameras"].keys())
+    fps = sessions[0].get("fps", 30)
+    robot_id = sessions[0].get("robot_id", "so101")
+    for d, s in zip(session_dirs[1:], sessions[1:]):
+        if list(s["cameras"].keys()) != cams:
+            raise SystemExit(f"{d}: cameras {list(s['cameras'].keys())} != {cams} (from {session_dirs[0]})")
+        if s.get("fps", 30) != fps:
+            raise SystemExit(f"{d}: fps {s.get('fps', 30)} != {fps} (from {session_dirs[0]})")
+        if s.get("robot_id", "so101") != robot_id:
+            raise SystemExit(f"{d}: robot_id {s.get('robot_id', 'so101')} != {robot_id} (from {session_dirs[0]})")
 
     dataset = LeRobotDataset.create(
         repo_id=args.repo_id, fps=fps, features=build_features(cams),
-        root=args.root, robot_type=session.get("robot_id", "so101"), use_videos=True,
+        root=args.root, robot_type=robot_id, use_videos=True,
     )
 
     task = input("Enter a natural-language description of your task (press Enter when done): ").strip()
 
-    for _, ep_dir in iter_kept_episodes(session_dir):
-        convert_episode(dataset, ep_dir, cams, read_meta(ep_dir), args.cam_offset, task)
+    for session_dir in session_dirs:
+        for _, ep_dir in iter_kept_episodes(session_dir):
+            convert_episode(dataset, ep_dir, cams, read_meta(ep_dir), args.cam_offset, task)
 
     dataset.finalize()
     print(f"Done -> {dataset.root}")
