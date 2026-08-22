@@ -2,6 +2,8 @@
 
 Data collection and remote VLA inference for an SO-101 arm. Robot-side host is a Raspberry Pi 5 (1GB); training and inference run on a GPU desktop.
 
+NOTE: This was the original design doc, retained for reference. Expect some divergence from the current implementations.
+
 ---
 
 ## 0. Governing constraint

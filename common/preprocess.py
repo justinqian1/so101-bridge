@@ -40,15 +40,3 @@ def decode_frame(jpeg_bytes: bytes) -> "np.ndarray":
     if img.size != (IMAGE_WIDTH, IMAGE_HEIGHT):
         img = img.resize((IMAGE_WIDTH, IMAGE_HEIGHT), RESAMPLE)
     return np.array(img, dtype=np.uint8)  # copy -> writable (LeRobot/torch prefer writable)
-
-
-def to_policy_tensor(frame: "np.ndarray"):
-    """uint8 HWC RGB [0,255] -> float32 CHW [0,1] torch tensor (serve.py).
-
-    add_frame() in convert.py stores the uint8 HWC array directly; LeRobot applies the
-    same CHW/float normalisation at train time, so this defines the serve-side match.
-    """
-    import torch
-
-    t = torch.from_numpy(np.ascontiguousarray(frame)).permute(2, 0, 1).contiguous()
-    return t.to(torch.float32) / 255.0

@@ -61,4 +61,5 @@ Run `pi/calibrate.py` to generate real ones before recording.
   policy — `convert.py` asserts they differ.
 - Joint order: `shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper`.
 - Body joints normalise to ±100, gripper to 0–100.
-- Control loop 30 Hz, policy query 10 Hz.
+- Control loop 30 Hz. Observations stream out whenever the action queue drains
+  past `--chunk-size-threshold` (async inference).
