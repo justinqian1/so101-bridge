@@ -36,7 +36,9 @@ def decode_frame(jpeg_bytes: bytes) -> "np.ndarray":
     Used by convert.py to fill the dataset and by serve.py before inference, so stored
     frames and live frames go through exactly the same spatial transform.
     """
-    img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+    img = Image.open(io.BytesIO(jpeg_bytes))
+    img.draft("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT))  # let libjpeg downscale while decoding (~2x)
+    img = img.convert("RGB")
     if img.size != (IMAGE_WIDTH, IMAGE_HEIGHT):
         img = img.resize((IMAGE_WIDTH, IMAGE_HEIGHT), RESAMPLE)
     return np.array(img, dtype=np.uint8)  # copy -> writable (LeRobot/torch prefer writable)

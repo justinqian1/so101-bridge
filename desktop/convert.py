@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from bisect import bisect_left
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import av
@@ -37,6 +39,10 @@ from common.schema import (
     read_joints_jsonl,
     read_meta,
 )
+
+
+# PIL releases the GIL through JPEG decode and resize, so decoding scales on threads.
+DECODE_THREADS = min(8, os.cpu_count() or 1)
 
 
 def load_packets(mkv_path: Path) -> tuple[list[float], list[bytes]]:
@@ -118,10 +124,24 @@ def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
 
     # Resample: nearest camera frame per control tick; track alignment error (§4).
     errors: list[float] = []
-    decode_cache: dict[tuple[str, int], np.ndarray] = {}
-    states, actions = [], []
+    picks: list[dict[str, int]] = []
+    for t_tick in tick_times:
+        pick = {}
+        for c in cams:
+            times, _ = cam_packets[c]
+            idx = nearest_index(times, t_tick + cam_offset)
+            errors.append(abs(times[idx] - (t_tick + cam_offset)))
+            pick[c] = idx
+        picks.append(pick)
 
-    for row, t_tick in zip(ticks, tick_times):
+    # Decode every packet the resampling actually kept, once each, in parallel. Ticks
+    # outnumber packets whenever a camera drops frames, so dedupe before decoding.
+    keys = sorted({(c, pick[c]) for pick in picks for c in cams})
+    with ThreadPoolExecutor(DECODE_THREADS) as pool:
+        decoded = dict(zip(keys, pool.map(lambda k: decode_frame(cam_packets[k[0]][1][k[1]]), keys)))
+
+    states, actions = [], []
+    for row, pick in zip(ticks, picks):
         state = np.asarray(row["state"], dtype=np.float32)
         action = np.asarray(row["action"], dtype=np.float32)
         assert state.shape == (len(JOINTS),), f"state has {state.shape[0]} joints, expected {len(JOINTS)}"
@@ -131,13 +151,7 @@ def convert_episode(dataset: LeRobotDataset, ep_dir: Path, cams: list[str],
 
         frame = {ACTION: action, STATE: state, "task": task}
         for c in cams:
-            times, data = cam_packets[c]
-            idx = nearest_index(times, t_tick + cam_offset)
-            errors.append(abs(times[idx] - (t_tick + cam_offset)))
-            key = (c, idx)
-            if key not in decode_cache:
-                decode_cache[key] = decode_frame(data[idx])
-            frame[image_key(c)] = decode_cache[key]
+            frame[image_key(c)] = decoded[(c, pick[c])]
         dataset.add_frame(frame)
 
     _assert_episode(np.stack(states), np.stack(actions), len(ticks), errors, ep_dir)
@@ -188,6 +202,9 @@ def main():
     dataset = LeRobotDataset.create(
         repo_id=args.repo_id, fps=fps, features=build_features(cams),
         root=args.root, robot_type=robot_id, use_videos=True,
+        # Feed frames straight to the encoder threads; the default path round-trips
+        # every frame through a temporary PNG, which costs more than the encode itself.
+        streaming_encoding=True,
     )
 
     task = input("Enter a natural-language description of your task (press Enter when done): ").strip()
