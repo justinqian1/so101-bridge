@@ -20,6 +20,14 @@ Observations stream on every tick once the queue drains past the threshold, and 
 server answers only the ones it runs — silence just means a fresher observation is
 already on its way, so there is no timeout to wait out.
 
+`--dry-run` exercises this whole path without letting the policy move the arm: you
+teleop as in record.py, observations stream as usual, and each action popped off the
+queue is printed instead of written. Everything that decides *when* an observation goes
+out — queue depth, must_go, the measured round trip — behaves exactly as it does for
+real, because the action is still popped every tick. What it cannot check is action
+quality: the arm follows the leader, not the chunks, so the policy sees states its own
+actions never produced and the printed actions drift accordingly.
+
 Safety behaviour around the loop:
   - queue starved  -> hold the last commanded position, never continue a stale chunk
   - queue empty    -> the observation goes out as must-go and bypasses the server filter
@@ -45,7 +53,7 @@ import zmq
 from common.calibration import load_calibration
 from common.cameras import open_streams
 from common.protocol import TimedChunk, TimedObservation, pack_request, unpack_reply
-from common.schema import CONTROL_HZ
+from common.schema import CONTROL_HZ, JOINTS
 from common.servo import ServoBus
 
 # Fixed device aliases from port-alias-setup.md — not configurable per-run.
@@ -60,6 +68,8 @@ AGGREGATE_OLD, AGGREGATE_NEW = 0.3, 0.7
 DISCONTINUITY_ATOL = 5.0
 # Socket thread poll timeout.
 POLL_MS = 5
+# Ticks between --dry-run status lines (30 Hz control loop -> ~3 lines/s).
+PRINT_EVERY = 10
 
 
 class Rate:
@@ -179,6 +189,7 @@ class PolicyClient(threading.Thread):
         self.chunk_size_threshold = chunk_size_threshold
         self.outbox: Queue = Queue(maxsize=1)
         self.latency = LatencyTracker()
+        self.chunks = 0
         self.shutdown_event = threading.Event()
         self._seq = 0
         # timestep -> monotonic send time, for round-trip timing. Several observations
@@ -254,6 +265,7 @@ class PolicyClient(threading.Thread):
                 del self._sent_at[stale]
         if sent is not None:
             self.latency.add(time.monotonic() - sent)
+        self.chunks += 1
         self.action_queue.merge(chunk)
 
 
@@ -263,6 +275,11 @@ def main():
     ap.add_argument("--calib", default="calibration/so101_follower.json")
     ap.add_argument("--chunk-size-threshold", type=float, default=0.5,
                     help="Send the next observation once the queue drains below this fraction")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Teleop the arm as in record.py and print the returned actions "
+                         "instead of executing them")
+    ap.add_argument("--leader-calib", default="calibration/so101_leader.json",
+                    help="--dry-run only: the leader arm you teleop with")
     args = ap.parse_args()
 
     streams = open_streams(CAMERAS)
@@ -271,27 +288,54 @@ def main():
     bus.configure()
     bus.enable_torque()
 
+    leader = None
+    if args.dry_run:
+        leader = ServoBus("/dev/so101-leader", load_calibration(args.leader_calib))
+        leader.connect()
+        leader.disable_torque()  # leader is moved by hand
+
     action_queue = ActionQueue()
     client = PolicyClient(f"tcp://{args.server}", action_queue, args.chunk_size_threshold)
     client.start()
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # SIGINT already raises
 
-    print(f"[run] streaming to {args.server}, executing at {CONTROL_HZ}Hz")
+    if args.dry_run:
+        print(f"[dry] streaming to {args.server}, teleop at {CONTROL_HZ}Hz — "
+              f"actions are printed, not executed")
+        print(f"[dry] joint order: {' '.join(JOINTS)}")
+    else:
+        print(f"[run] streaming to {args.server}, executing at {CONTROL_HZ}Hz")
     rate = Rate(CONTROL_HZ)
     hold: np.ndarray | None = None
     starved = False
+    # Dry-run stats. Counted only once a first chunk has landed: the queue is legitimately
+    # empty until then, and folding that startup in would hide every later starve.
+    ticks = starved_ticks = starve_run = worst_starve = 0
+    min_qsize: int | None = None
     try:
         while True:
             action = action_queue.get()
             if action is not None:
-                bus.write_positions(action)
-                hold = action
                 starved = False
+                starve_run = 0
             else:
                 if not starved:
                     print("[starved] queue empty, holding position")
                     starved = True
+                if client.chunks:
+                    starved_ticks += 1
+                    starve_run += 1
+                    worst_starve = max(worst_starve, starve_run)
+
+            if args.dry_run:
+                # The action is popped and dropped; the arm follows the leader instead.
+                lead = leader.read_positions()
+                bus.write_positions(lead)
+            elif action is not None:
+                bus.write_positions(action)
+                hold = action
+            else:
                 if hold is None:
                     hold = bus.read_positions(num_retry=1)
                 bus.write_positions(hold)
@@ -301,14 +345,34 @@ def main():
                 if all(f is not None for f in frames.values()):  # else cameras still warming up
                     client.send(bus.read_positions(num_retry=1), frames)
 
+            if args.dry_run and client.chunks:
+                qsize = action_queue.qsize()
+                min_qsize = qsize if min_qsize is None else min(min_qsize, qsize)
+                if ticks % PRINT_EVERY == 0:
+                    line = (f"[dry] t={action_queue.next_timestep():6d} "
+                            f"q={qsize:3d}/{action_queue.chunk_size} chunks={client.chunks:4d} "
+                            f"rtt_p95={client.latency.p95() * 1000:4.0f}ms")
+                    if action is None:
+                        print(f"{line} starved")
+                    else:
+                        print(f"{line} Δlead={float(np.max(np.abs(action - lead))):5.1f} "
+                              f"act=[{' '.join(f'{v:7.1f}' for v in action)}]")
+                ticks += 1
+
             rate.sleep()
     finally:
         client.shutdown_event.set()
         client.join(timeout=1.0)
         bus.disable_torque()
         bus.close()
+        if leader is not None:
+            leader.close()
         for s in streams.values():
             s.stop()
+        if args.dry_run:
+            print(f"[dry] {ticks} ticks and {client.chunks} chunks after the first chunk | "
+                  f"starved {starved_ticks} ticks (longest run {worst_starve}) | "
+                  f"min queue {min_qsize} | rtt_p95 {client.latency.p95() * 1000:.0f}ms")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ pip install -e .[desktop]   # on the GPU desktop
 | `common/protocol.py` | both | ZMQ REQ/REP wire format |
 | `pi/calibrate.py` | Pi | one-off, writes `calibration/so101_<arm>.json` |
 | `pi/record.py` | Pi | teleop + capture to disk |
-| `pi/run_policy.py` | Pi | inference client |
+| `pi/run_policy.py` | Pi | inference client (`--dry-run` = teleop + print actions) |
 | `desktop/convert.py` | desktop | session dir → LeRobotDataset |
 | `desktop/serve.py` | desktop | policy server |
 | `tests/latency_probe.py` | either | go/no-go for the dumb-bridge design |
@@ -40,15 +40,17 @@ python -m pi.calibrate --arm leader
 python -m pi.record --task pick_cube
 #   Press: s = start or stop recording; k = keep; d = discard; q = quit
 
-# 3. Convert on the desktop and CHECK alignment before recording 200 more.
+# 3. Convert to LeRobotDataset.
 python -m desktop.convert --session sessions/2026-07-23_pick_cube \
     --repo-id you/so101_pick_cube --root ./data/so101_pick_cube
 
 # 4. Train with stock LeRobot (desktop).
 
-# 5. Inference (last).
+# 5. Inference.
 python -m desktop.serve  --checkpoint ./checkpoints/pick_cube --device cuda   # desktop
-python -m pi.run_policy  --server DESKTOP_TS_IP:5555                         # Pi
+python -m pi.run_policy  --server DESKTOP_TS_IP:5555 --dry-run   # dry run: you teleop,
+                                                                 # and chunks are printed, not executed
+python -m pi.run_policy  --server DESKTOP_TS_IP:5555             # for real; the policy drives the arm
 ```
 
 The `calibration/*.json` files committed here are **placeholders** (identity ranges).
