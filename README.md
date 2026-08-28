@@ -1,7 +1,8 @@
 # so101-bridge
 
-Data capture and remote VLA inference for an SO-101 arm. A Raspberry Pi is the
-robot-side machine; a GPU desktop does dataset writing, training, and inference. This repo is a workaround to the Pi having insufficient RAM to load the LeRobot module.
+This repo provides utils for data capture and VLA inference for an SO-101 arm (async inference and RTC on by default).
+This repo is a workaround for Raspberry Pi's not having enough RAM to load the LeRobot module.
+Workflow: Pi for data capture and port forwarding; GPU desktop for dataset writing, training, and inference.
 
 ## Install
 
@@ -10,59 +11,50 @@ pip install -e .[pi]        # on the Raspberry Pi
 pip install -e .[desktop]   # on the GPU desktop
 ```
 
-## Layout
+## Pi-side setup
 
-| Path | Runs on | Purpose |
-|---|---|---|
-| `common/schema.py` | both | joint order, rates, feature keys, on-disk layout |
-| `common/calibration.py` | both | vendored homing/normalisation math + sign-magnitude |
-| `common/servo.py` | Pi | Feetech STS3215 bus: read/write joints |
-| `common/cameras.py` | Pi | ffmpeg passthrough — file sink (capture) + pipe sink (inference) |
-| `common/preprocess.py` | desktop | JPEG → policy input; the one file that must not drift |
-| `common/protocol.py` | both | ZMQ REQ/REP wire format |
-| `pi/calibrate.py` | Pi | one-off, writes `calibration/so101_<arm>.json` |
-| `pi/record.py` | Pi | teleop + capture to disk |
-| `pi/run_policy.py` | Pi | inference client (`--dry-run` = teleop + print actions) |
-| `desktop/convert.py` | desktop | session dir → LeRobotDataset |
-| `desktop/serve.py` | desktop | policy server |
-| `tests/latency_probe.py` | either | go/no-go for the dumb-bridge design |
-
-## Build / run order
-
-First do the [port alias setup](port-alias-setup.md) (one time) — downstream scripts rely on those aliases.
+**One time:** do the [port alias setup](port-alias-setup.md) to set aliases for the arms and cameras; 
+downstream scripts rely on these aliases. Then calibrate the arms:
 
 ```bash
-# 1. Calibrate each arm (overwrites the placeholder JSONs in calibration/).
 python -m pi.calibrate --arm follower
 python -m pi.calibrate --arm leader
+```
 
-# 2. Record teleop episodes.
+**Every time:** connect the cameras to the blue (USB 3.0) ports, and the arms to the gray (USB 2.0) ports.
+Before recording, verify all externals are connected:
+```bash
+ls -l /dev/so101-leader /dev/so101-follower /dev/v4l/by-id/cam-ext /dev/v4l/by-id/cam-wrist
+# each should resolve to a distinct ttyACM*/video* node
+```
+
+## Usage
+
+```bash
+# 1. Record teleop episodes, Pi-only; task(s) are set inside this script.
 python -m pi.record --name pick_cube
-#   Prompts for a natural-language task, which is tagged onto every episode until changed.
 #   Press: s = start/stop recording; t = change task; k = keep; d = discard; q = quit
 
-# 3. Convert to LeRobotDataset.
-python -m desktop.convert --session sessions/2026-07-23_pick_cube \
-    --repo-id you/so101_pick_cube --root ./data/so101_pick_cube
+# 2. Convert to LeRobotDataset on the desktop.
+python -m desktop.convert --session sessions/2026-07-23_pick_cube --repo-id your_name/so101_pick_cube
 
-# 4. Train with stock LeRobot (desktop).
+# 3. Train VLA.
+lerobot-train --policy.path=lerobot/smolvla_base \
+	--dataset.repo_id=your_name/dataset_name \
+	--dataset.image_transforms.enable=true \
+	--dataset.image_transforms.max_num_transforms=3 \
+	--batch_size=64 --steps=20000 \
+	--output_dir=/path/to/output \
+	--job_name=job_name \
+	--policy.device=cuda \
+	--policy.push_to_hub=false \
+	--wandb.enable=true \
+	--save_freq=2500 \
+	--rename_map='{"observation.images.ext": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"}'
 
-# 5. Inference.
+# 4. Inference.
 python -m desktop.serve  --checkpoint ./checkpoints/pick_cube --device cuda   # desktop
 python -m pi.run_policy  --server DESKTOP_TS_IP:5555 --dry-run   # dry run: you teleop,
                                                                  # and chunks are printed, not executed
 python -m pi.run_policy  --server DESKTOP_TS_IP:5555             # for real; the policy drives the arm
 ```
-
-The `calibration/*.json` files committed here are **placeholders** (identity ranges).
-Run `pi/calibrate.py` to generate real ones before recording.
-
-## Conventions frozen
-
-- `action` = **leader** position (commanded), `observation.state` = **follower**
-  position (what happened). Swapping them trains without error and yields a useless
-  policy — `convert.py` asserts they differ.
-- Joint order: `shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper`.
-- Body joints normalise to ±100, gripper to 0–100.
-- Control loop 30 Hz. Observations stream out whenever the action queue drains
-  past `--chunk-size-threshold` (async inference).
