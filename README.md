@@ -37,8 +37,9 @@ python -m pi.calibrate --arm follower
 python -m pi.calibrate --arm leader
 
 # 2. Record teleop episodes.
-python -m pi.record --task pick_cube
-#   Press: s = start or stop recording; k = keep; d = discard; q = quit
+python -m pi.record --name pick_cube
+#   Prompts for a natural-language task, which is tagged onto every episode until changed.
+#   Press: s = start/stop recording; t = change task; k = keep; d = discard; q = quit
 
 # 3. Convert to LeRobotDataset.
 python -m desktop.convert --session sessions/2026-07-23_pick_cube \

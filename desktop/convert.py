@@ -178,9 +178,11 @@ def _assert_episode(states: np.ndarray, actions: np.ndarray, n_ticks: int,
 def main():
     ap = argparse.ArgumentParser(description="Convert a capture session to a LeRobotDataset.")
     ap.add_argument("--session", required=True, nargs="+",
-                    help="One or more session dirs, sharing cams, fps, and task.")
+                    help="One or more session dirs, sharing cams, fps, and robot_id.")
     ap.add_argument("--repo-id", required=True, help="e.g. yourname/so101_pick_cube")
     ap.add_argument("--root", default=None, help="Local dataset dir (default: HF cache)")
+    ap.add_argument("--task", default=None,
+                    help="Override every episode's recorded task with this one string.")
     ap.add_argument("--cam-offset", type=float, default=0.0,
                     help="Seconds to shift camera timeline vs joints (verify empirically once, §3.5)")
     args = ap.parse_args()
@@ -207,11 +209,14 @@ def main():
         streaming_encoding=True,
     )
 
-    task = input("Enter a natural-language description of your task (press Enter when done): ").strip()
-
     for session_dir in session_dirs:
         for _, ep_dir in iter_kept_episodes(session_dir):
-            convert_episode(dataset, ep_dir, cams, read_meta(ep_dir), args.cam_offset, task)
+            meta = read_meta(ep_dir)
+            # LeRobot indexes tasks per frame, so episodes in one dataset may differ (§4).
+            task = args.task or meta.task
+            if not task:
+                raise SystemExit(f"{ep_dir}: no task in meta.json — pass --task")
+            convert_episode(dataset, ep_dir, cams, meta, args.cam_offset, task)
 
     dataset.finalize()
     print(f"Done -> {dataset.root}")

@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import queue
+import select
 import subprocess
 import sys
 import termios
@@ -53,42 +54,39 @@ def _writer_thread(path: Path, q: "queue.Queue") -> None:
 # ── non-blocking single-key listener (operator control) ──────────────────────
 
 class KeyListener:
+    """Reads the tty in cbreak mode from whichever thread calls it."""
+
     def __init__(self):
         self._fd = sys.stdin.fileno()
         self._old = termios.tcgetattr(self._fd)
-        self._key = None
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
         tty.setcbreak(self._fd)
-        threading.Thread(target=self._loop, daemon=True).start()
 
-    def _loop(self):
-        import select
-        while not self._stop.is_set():
-            if select.select([self._fd], [], [], 0.1)[0]:
-                # Read the raw fd: sys.stdin.read(1) pulls every pending byte into
-                # Python's buffer and returns one, stranding the rest where select
-                # can't see them — a double-tapped key would go unnoticed.
-                b = os.read(self._fd, 1)
-                if not b:
-                    return
-                with self._lock:
-                    self._key = b.decode(errors="ignore")
-
-    def poll(self) -> str | None:
-        with self._lock:
-            k, self._key = self._key, None
-        return k
+    def drain(self) -> str:
+        """Consume every pending keystroke, in arrival order. Non-blocking."""
+        out = ""
+        while select.select([self._fd], [], [], 0)[0]:
+            b = os.read(self._fd, 64)
+            if not b:
+                break
+            out += b.decode(errors="ignore")
+        return out
 
     def wait(self, keys: str) -> str:
         while True:
-            k = self.poll()
-            if k and k in keys:
-                return k
+            for k in self.drain():
+                if k in keys:
+                    return k
             time.sleep(0.02)
 
+    def prompt(self, msg: str) -> str:
+        """Read a full line: cooked mode for echo and line editing, then back to cbreak."""
+        termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+        try:
+            return input(msg).strip()
+        finally:
+            tty.setcbreak(self._fd)
+
     def restore(self):
-        self._stop.set()
         termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
 
 
@@ -117,7 +115,7 @@ def _warn_if_throttled() -> None:
 
 def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus,
                    cameras: FileRecorder, keys: KeyListener) -> None:
-    """Record one episode until [s]top (or [q], which behaves like [s] mid-recording)."""
+    """Record one episode until [s]top."""
     ep_dir.mkdir(parents=True)
     period = 1.0 / CONTROL_HZ
 
@@ -143,7 +141,7 @@ def record_episode(ep_dir: Path, task: str, follower: ServoBus, leader: ServoBus
             q.put({"t": round(time.monotonic() - t0_mono, 4),
                    "state": state.tolist(), "action": action.tolist()})
 
-            if keys.poll() in ("s", "q"):
+            if "s" in keys.drain():
                 stopped = True
                 break
 
@@ -194,9 +192,17 @@ def _reconnect(follower: ServoBus, leader: ServoBus) -> bool:
     return False
 
 
+def _ask_task(keys: KeyListener, msg: str) -> str:
+    """Ask until a non-empty task: it is what convert.py writes into the dataset."""
+    while True:
+        task = keys.prompt(msg)
+        if task:
+            return task
+
+
 def main():
     ap = argparse.ArgumentParser(description="SO-101 teleop capture.")
-    ap.add_argument("--task", required=True, help="Task description, e.g. 'pick_cube'")
+    ap.add_argument("--name", required=True, help="Session name, e.g. 'pickup_cube'")
     ap.add_argument("--out", default="sessions", help="Sessions root directory")
     ap.add_argument("--robot-id", default="so101")
     ap.add_argument("--follower-calib", default="calibration/so101_follower.json")
@@ -219,7 +225,7 @@ def main():
     leader.disable_torque()  # leader is moved by hand
 
     stamp = datetime.now().strftime("%Y-%m-%d")
-    session_dir = Path(args.out) / f"{stamp}_{args.task}"
+    session_dir = Path(args.out) / f"{stamp}_{args.name}"
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "session.json").write_text(json.dumps({
         "robot_id": args.robot_id,
@@ -236,13 +242,18 @@ def main():
     cameras = FileRecorder(cameras_cfg)
     keys = KeyListener()
     try:
+        task = _ask_task(keys, "[session] task description: ")
         while True:
-            print("[session] [s]tart recording  [q]uit")
-            if keys.wait("sq") == "q":
+            print(f"[session] task: {task} | [s]tart recording  [t]ask change  [q]uit")
+            k = keys.wait("stq")
+            if k == "q":
                 break
+            if k == "t":
+                task = _ask_task(keys, "[session] new task description: ")
+                continue
             idx = next_episode_index(session_dir)
             try:
-                record_episode(episode_dir(session_dir, idx), args.task,
+                record_episode(episode_dir(session_dir, idx), task,
                                follower, leader, cameras, keys)
             except Exception:
                 print("[session] attempting to reconnect...")
